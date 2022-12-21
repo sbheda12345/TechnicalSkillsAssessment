@@ -1,0 +1,167 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+Technical Skills Assessment
+Author: Shiraz Bheda
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+
+getwd()
+setwd("C://Users//shira//Desktop//Technical Skills Assessment_2022")
+
+#install.packages("tree")
+#install.packages("naniar")
+#install.packages("ppcor")
+library("tree")
+library("dplyr")
+library("naniar")
+library(tidyverse)
+library(randomForest)
+library(ppcor)
+library(dplyr)
+```
+
+```{r}
+###load input files into a dataframe
+df <- read.csv("clinical.csv", stringsAsFactors = F)
+
+###assign "ID" column as the row names vector, remove from dataframe
+rownames(df) <- df$ID
+df$ID <- NULL
+
+###rename certain columns for clarity
+df <- df %>% 
+       rename("Tumor.Stage" = "T",
+              "Metastasis.To.Lymph.Nodes" = "N",
+              "Distant.Metastases" = "M")
+```
+
+Pre-processing checklist
+
+#1. Check that field separators are splitting metadata in clinical.csv input file as intended
+```{r}
+###check dimensions of dataframe
+dim(df)
+head(df)
+tail(df)
+```
+2. Exploratory data analysis: Check for any misspellings, blank spaces, formatting inconsistencies
+```{r}
+###Column 'Survival.Months' has 3 instances of floating-point numbers (9.5 months)
+table(df$Survival.Months)
+
+###Column 'Stage' has an incorrect value that needs to be changed (1B instead of IB)
+table(df$Stage)
+df$Stage[df$Stage == '1B'] <- 'IB'
+table(df$Stage)
+
+###Column 'Primary.Site' has incorrect spellings ('Righ Upper Lobe')
+table(df$Primary.Site)
+df$Primary.Site[df$Primary.Site == 'Righ Upper Lobe'] <- 'Right Upper Lobe'
+table(df$Primary.Site)
+```
+
+3. Sanity-checks: Make sure that information in clinical.csv file is logically consistent
+```{r}
+###(Assuming that mutations & genes referred to are all in coding regions) all Values in 
+###'Num.Mutations' should not be lower than corresponding values in 'Num.Mutated.Genes'
+###column
+check1 <- df[df$Num.Mutations < df$Num.Mutated.Genes, ]
+nrow(check1) ###No selected rows indicates logic is ok between two columns
+
+
+###Since the data comes from de-identified databases in order to fulfill PHI compliance, 
+###there is a possibility that the same patient is accidentally duplicated within a 
+###dataset. So we add a check here to ensure that is not the case.
+df$key<-apply(df,1,paste,collapse="")
+check2 <- table(table(df$key))
+check2 #all concatenated values are unique 
+
+###Load genomics.csv file, check to make sure that the number of genes per sample agrees
+###with data in clinical.csv file
+df2 <- read.csv("genomics.csv", stringsAsFactors = F)
+df3 <- as.data.frame(table(df2$ID))
+rownames(df3) <- df3$Var1
+df3$Var1 <- NULL
+check3 <- merge(df, df3, by.x = 0, by.y = 0)
+
+check3$Num.Mutated.Genes - check3$Freq #data in clinical.csv & genomics.csv files match
+
+```
+Feature selection: Drop columns with greater than 20% missing data, check features for high correlations
+```{r}
+###drop columns with missing data greater than 20%
+df_dropped_features_with_missing_data <- df[,!names(df) %in% 
+      c("Grade", "Tumor.Stage", "Metastasis.To.Lymph.Nodes", "Distant.Metastases",
+        "Tumor.Size")]
+
+###checking pearson correlation between Num.Mutated.Genes & Num.Mutations
+check4 <- df_dropped_features_with_missing_data[, c(9, 10)]
+pcor(check4, method = "pearson") #91% correlation indicates redundancy
+
+
+###drop 'Num.Genes' and get rid of key
+df_dropped_features_with_missing_and_redundant_data <- 
+df_dropped_features_with_missing_data[,!names(
+  df_dropped_features_with_missing_data) %in% 
+      c("Num.Mutated.Genes", "key")]
+
+```
+
+```{r}
+###Selection of inputs for the RF model
+inputs <- df_dropped_features_with_missing_and_redundant_data
+
+inputs <- as.data.frame(inputs)
+inputs$Outcome <- as.character(inputs$Outcome)
+inputs$Outcome <- as.factor(inputs$Outcome)
+inputs$Age <- as.numeric(inputs$Age)
+inputs$Num.Primaries <- as.numeric(inputs$Num.Primaries)
+inputs$Radiation <- as.numeric(inputs$Radiation)
+inputs$Stage <- as.factor(inputs$Stage)
+inputs$Primary.Site <- as.factor(inputs$Primary.Site)
+inputs$Histology <- as.factor(inputs$Histology)
+inputs$Num.Mutations <- as.factor(inputs$Num.Mutations)
+
+#####USING RF MODEL#####
+
+#use bagging to avoid losing data while training model
+set.seed(12345)
+bag.tree.DN = randomForest(Outcome~., data = inputs, mtry = 3, ntree = 501,
+                           importance = TRUE, na.action=na.roughfix, keep.inbag = TRUE,
+                           norm.votes = FALSE, replace = FALSE)
+
+
+###generate a visualization of per-category outcome error rate, as well as the OOB error
+###rate, and how they change as the number of decision trees are increased
+plot(bag.tree.DN, legend=TRUE)
+```
+
+```{r}
+###generate summary statistics of model
+summary(bag.tree.DN)
+```
+
+```{r}
+###generate confusion matrix to evaluate final error rates
+bag.tree.DN$confusion
+```
+
+```{r}
+###save individual number of decision tree votes as a separate dataframe
+bag.tree.DN_df <- as.data.frame(bag.tree.DN$votes)
+dim(bag.tree.DN_df)
+
+bag.tree.DN_df
+```
+
+```{r}
+###export to csv format
+write.csv(bag.tree.DN_df,
+          "votes.csv")
+print(row.names(bag.tree.DN_df))
+
+```
